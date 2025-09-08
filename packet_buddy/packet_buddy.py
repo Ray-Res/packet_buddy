@@ -9,7 +9,8 @@ from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 from langchain_community.document_loaders import JSONLoader
 from langchain_experimental.text_splitter import SemanticChunker
-from langchain_community.embeddings import HuggingFaceInstructEmbeddings 
+from langchain_community.embeddings import HuggingFaceInstructEmbeddings
+from langchain_community.document_loaders import TextLoader
 
 # Message classes
 class Message:
@@ -35,7 +36,6 @@ def returnSystemText(pcap_data: str) -> str:
     PACKET_WHISPERER = f"""
         You are a helper assistant specialized in analysing packet captures used for troubleshooting & technical analysis. Use the information present in packet_capture_info to answer all the questions truthfully. If the user asks about a specific application layer protocol, use the following hints to inspect the packet_capture_info to answer the question. Format your response in markdown text with line breaks & emojis.
 
-        hints :
         http means tcp.port = 80
         https means tcp.port = 443
         snmp means udp.port = 161 or udp.port = 162
@@ -55,17 +55,22 @@ def returnSystemText(pcap_data: str) -> str:
         LDAPS means tcp.port = 636 (secure version of LDAP)
         SIP means tcp.port = 5060 or udp.port = 5060 (for initiating interactive user sessions involving multimedia elements such as video, voice, chat, gaming, etc.)
         RTP (Real-time Transport Protocol) doesn't have a fixed port but is commonly used in conjunction with SIP for the actual data transfer of audio and video streams.
+
+        When answering questions about pcaps, always provide a packet reference e.g. frame number or timestamp
     """
     # Might be redundant - pcap data - alraedy doing rag - less tokens
     return PACKET_WHISPERER
 
 # Define a class for chatting with pcap data
 class ChatWithPCAP:
-    def __init__(self, json_path):
+    def __init__(self, json_path, extra_text_path=None):
         self.embedding_model = load_model()
         self.json_path = json_path
+        self.extra_text_path = extra_text_path
         self.conversation_history = []
         self.load_json()
+        if self.extra_text_path:
+            self.load_text_doc()
         self.split_into_chunks()
         self.store_in_chroma()
         self.setup_conversation_memory()
@@ -80,8 +85,14 @@ class ChatWithPCAP:
         )
         self.pages = self.loader.load_and_split()
 
+    def load_text_doc(self):
+        """Load an additional explanatory text document."""
+        loader = TextLoader(self.extra_text_path)
+        extra_docs = loader.load()
+        self.pages.extend(extra_docs)
+
     def split_into_chunks(self):
-        with st.spinner("Splitting into chunks..."):         
+        with st.spinner("Splitting into chunks..."):
             self.text_splitter = SemanticChunker(self.embedding_model)
             self.docs = self.text_splitter.split_documents(self.pages)
 
@@ -92,27 +103,53 @@ class ChatWithPCAP:
             self.vectordb.persist()
 
     def setup_conversation_memory(self):
-        self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+        self.memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            input_key="question",   # <- tell memory what the input field is
+            output_key="answer",    # <- tell memory what to save from outputs
+            return_messages=True
+        )
 
     def setup_conversation_retrieval_chain(self):
-        self.llm = Ollama(model=st.session_state['selected_model'], base_url="http://ollama:11434")
-        self.qa = ConversationalRetrievalChain.from_llm(self.llm, self.vectordb.as_retriever(search_kwargs={"k": 10}), memory=self.memory)
+        self.llm = Ollama(
+            model=st.session_state['selected_model'],
+            base_url="http://ollama:11434"
+        )
+        self.qa = ConversationalRetrievalChain.from_llm(
+            llm=self.llm,
+            retriever=self.vectordb.as_retriever(search_kwargs={"k": 6}),
+            memory=self.memory,
+            chain_type="stuff",         # or "map_reduce"/"map_rerank"
+            return_source_documents=True             # <-- so we can display sources
+        )
 
     def generate_priming_text(self):
         pcap_summary = " ".join([str(page) for page in self.pages[:5]])
         return returnSystemText(pcap_summary)
 
     def chat(self, question):
-        # Combine the original question with the priming text
-        primed_question = self.priming_text + "\n\n" + question
-
-        response = self.qa.invoke(primed_question)
-        
+        primed_question = self.priming_text + "\n\n" + question  # (see Option B note below)
+        response = self.qa.invoke({"question": primed_question})
         if response:
-            st.write("Query:", primed_question)
-            st.write("Response:", response['answer'])
+            # Synthesized (reduce) answer:
+            synthesized = response.get("answer", "")
 
-            return {'answer': response['answer']}
+            # “Raw” material: show retrieved docs that fed the map step.
+            # (LangChain doesn’t expose the per-doc map outputs directly,
+            # but you can at least show the source chunks and/or re-run map prompts.)
+            sources = response.get("source_documents", [])
+
+            st.write("Query:", primed_question)
+            st.markdown("**Synthesized Answer (Map–Reduce):**")
+            st.markdown(synthesized)
+
+            if sources:
+                st.markdown("**Raw Inputs (Mapped Sources):**")
+                for i, d in enumerate(sources, 1):
+                    st.markdown(f"**Source {i}:**")
+                    st.code(d.page_content[:1200] + ("..." if len(d.page_content) > 1200 else ""))
+
+            return {"answer": synthesized}
    
 # Function to convert pcap to JSON
 def pcap_to_json(pcap_path, json_path):
@@ -136,6 +173,8 @@ def get_ollama_models(base_url):
 def upload_and_convert_pcap():
     st.title('Packet Buddy - Chat with Packet Captures')
     uploaded_file = st.file_uploader("Choose a PCAP file", type="pcap")
+    extra_doc = st.file_uploader("Optionally, upload an explanatory text file", type=["txt", "md"])
+
     if uploaded_file:
         if not os.path.exists('temp'):
             os.makedirs('temp')
@@ -144,42 +183,71 @@ def upload_and_convert_pcap():
         with open(pcap_path, "wb") as f:
             f.write(uploaded_file.getvalue())
         pcap_to_json(pcap_path, json_path)
+
+        # Save extra text file if provided
+        extra_text_path = None
+        if extra_doc:
+            extra_text_path = os.path.join("temp", extra_doc.name)
+            with open(extra_text_path, "wb") as f:
+                f.write(extra_doc.getvalue())
+
+        # Store in session state
         st.session_state['json_path'] = json_path
-        st.success("PCAP file uploaded and converted to JSON.")
-        # Fetch and display the models in a select box
-        models = get_ollama_models("http://ollama:11434/")  # Make sure to use the correct base URL
+        st.session_state['extra_text_path'] = extra_text_path
+        st.success("Files uploaded and converted.")
+
+        # Fetch Ollama models
+        models = get_ollama_models("http://ollama:11434/")
         if models:
             selected_model = st.selectbox("Select Model", models)
             st.session_state['selected_model'] = selected_model
             
             if st.button("Proceed to Chat"):
-                st.session_state['page'] = 2        
+                st.session_state['page'] = 2      
 
 # Streamlit UI for chat interface
 def chat_interface():
     st.title('Packet Buddy - Chat with Packet Captures')
+
     json_path = st.session_state.get('json_path')
     if not json_path or not os.path.exists(json_path):
         st.error("PCAP file missing or not converted. Please go back and upload a PCAP file.")
         return
 
+    # Create / reuse the chat engine
     if 'chat_instance' not in st.session_state:
-        st.session_state['chat_instance'] = ChatWithPCAP(json_path=json_path)
+        st.session_state['chat_instance'] = ChatWithPCAP(
+            json_path=json_path,
+            extra_text_path=st.session_state.get('extra_text_path')
+        )
 
-    user_input = st.text_input("Ask a question about the PCAP data:")
-    if user_input and st.button("Send"):
-        with st.spinner('Thinking...'):
-            response = st.session_state['chat_instance'].chat(user_input)
-            st.markdown("**Synthesized Answer:**")
-            if isinstance(response, dict) and 'answer' in response:
-                st.markdown(response['answer'])
-            else:
-                st.markdown("No specific answer found.")
+    # Create message store
+    if 'messages' not in st.session_state:
+        st.session_state['messages'] = []
 
-            st.markdown("**Chat History:**")
-            for message in st.session_state['chat_instance'].conversation_history:
-                prefix = "*You:* " if isinstance(message, HumanMessage) else "*AI:* "
-                st.markdown(f"{prefix}{message.content}")
+    # Render past messages
+    for m in st.session_state['messages']:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    # Persistent chat input (like ChatGPT)
+    prompt = st.chat_input("Ask a question about the PCAP data…")
+    if prompt:
+        # Show the user bubble immediately
+        st.session_state['messages'].append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Get answer from your chain
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                result = st.session_state['chat_instance'].chat(prompt) or {}
+                answer = result.get("answer", "I couldn't find a specific answer.")
+                st.markdown(answer)
+
+        # Store assistant reply for re-render
+        st.session_state['messages'].append({"role": "assistant", "content": answer})
+
 
 if __name__ == "__main__":
     if 'page' not in st.session_state:

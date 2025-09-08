@@ -2,46 +2,51 @@ FROM ubuntu:latest
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN echo "==> Upgrading apk and installing system utilities ...." \
- && apt -y update \
- && apt-get install -y wget \
- && apt-get -y install sudo
+# Install system packages
+RUN apt-get update && apt-get install -y \
+    wget \
+    sudo \
+    dos2unix \
+    python3 \
+    python3-venv \
+    python3-pip \
+    tshark \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN echo "==> Installing Python3 and pip ...." \  
- && apt-get install python3 -y \
- && apt install python3-pip -y
+# Create virtual environment
+RUN python3 -m venv /opt/venv
 
-RUN echo "==> Install dos2unix..." \
-  && sudo apt-get install dos2unix -y 
+# Make sure the venv's Python and pip are used
+ENV PATH="/opt/venv/bin:$PATH"
 
-RUN echo "==> Install langchain requirements.." \
-  && pip install --break-system-packages -U --quiet langchain_experimental langchain langchain-community \
-  && pip install --break-system-packages chromadb \
-  && pip install --break-system-packages tiktoken
+# Upgrade pip and install all Python packages inside venv
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -U \
+        streamlit \
+        langchain==0.2.14 \
+        langchain-community==0.2.12 \
+        langchain_experimental \
+        chromadb \
+        tiktoken \
+        pyshark \
+        requests \
+        jq \
+        sentence-transformers==2.2.2 \
+        "huggingface_hub<=0.16.4" \
+        InstructorEmbedding
 
-RUN echo "==> Install jq.." \
-  && pip install --break-system-packages jq
-
-RUN echo "==> Install streamlit.." \
-  && pip install --break-system-packages streamlit --upgrade
-
-# Install tshark
-RUN apt-get update && apt-get install -y tshark
-
-RUN echo "==> Adding pyshark ..." \
-  && pip install --break-system-packages pyshark
-
-RUN echo "==> Adding requests ..." \
-  && pip install --break-system-packages requests
-
-RUN echo "==> Adding InstructorEmbedding ..." \
-  && pip install --break-system-packages -U sentence-transformers==2.2.2 \
-  && pip install --break-system-packages InstructorEmbedding
-
+# Copy application code
 COPY /packet_buddy /packet_buddy/
 COPY /scripts /scripts/
 
-RUN echo "==> Convert script..." \
-  && dos2unix /scripts/startup.sh
+# Convert scripts to Unix format
+RUN dos2unix /scripts/startup.sh
 
+# Set working directory
+WORKDIR /packet_buddy
+
+# Expose Streamlit default port
+EXPOSE 8501
+
+# Start the app
 CMD ["/bin/bash", "/scripts/startup.sh"]
