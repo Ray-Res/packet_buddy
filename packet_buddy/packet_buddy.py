@@ -32,34 +32,23 @@ def load_model():
     return embedding_model
 
 # Function to generate priming text based on pcap data
+
 def returnSystemText(pcap_data: str) -> str:
     PACKET_WHISPERER = f"""
-        You are a helper assistant specialized in analysing packet captures used for troubleshooting & technical analysis. Use the information present in packet_capture_info to answer all the questions truthfully. If the user asks about a specific application layer protocol, use the following hints to inspect the packet_capture_info to answer the question. Format your response in markdown text with line breaks & emojis.
+    You are a helper assistant specialized in analysing packet captures.
 
-        http means tcp.port = 80
-        https means tcp.port = 443
-        snmp means udp.port = 161 or udp.port = 162
-        ntp means udp.port = 123
-        ftp means tcp.port = 21
-        ssh means tcp.port = 22
-        BGP means tcp.port = 179
-        OSPF uses IP protocol 89 (not TCP/UDP port-based, but rather directly on top of IP)
-        MPLS doesn't use a TCP/UDP port as it's a data-carrying mechanism for high-performance telecommunications networks
-        DNS means udp.port = 53 (also tcp.port = 53 for larger queries or zone transfers)s
-        DHCP uses udp.port = 67 for the server and udp.port = 68 for the client
-        SMTP means tcp.port = 25 (for email sending)
-        POP3 means tcp.port = 110 (for email retrieval)
-        IMAP means tcp.port = 143 (for email retrieval, with more features than POP3)
-        HTTPS means tcp.port = 443 (secure web browsing)
-        LDAP means tcp.port = 389 (for accessing and maintaining distributed directory information services over an IP network)
-        LDAPS means tcp.port = 636 (secure version of LDAP)
-        SIP means tcp.port = 5060 or udp.port = 5060 (for initiating interactive user sessions involving multimedia elements such as video, voice, chat, gaming, etc.)
-        RTP (Real-time Transport Protocol) doesn't have a fixed port but is commonly used in conjunction with SIP for the actual data transfer of audio and video streams.
+    Use the packet_capture_info provided below plus any retrieved context
+    to answer all questions truthfully. Always reference frame numbers
+    or timestamps if possible.
 
-        When answering questions about pcaps, always provide a packet reference e.g. frame number or timestamp
+    ### Protocol hints
+    HCI packets always start with 0x5A 0x0F, contain the protocol tag 0xAB 0xBA 0xCE 0xDE, and end with 0x2E 0x8D
+
+    ### packet_capture_info
+    {pcap_data}
     """
-    # Might be redundant - pcap data - alraedy doing rag - less tokens
     return PACKET_WHISPERER
+
 
 # Define a class for chatting with pcap data
 class ChatWithPCAP:
@@ -118,15 +107,22 @@ class ChatWithPCAP:
         )
         self.qa = ConversationalRetrievalChain.from_llm(
             llm=self.llm,
-            retriever=self.vectordb.as_retriever(search_kwargs={"k": 6}),
+            retriever=self.vectordb.as_retriever(search_kwargs={"k": 10}),
             memory=self.memory,
-            chain_type="stuff",
+            chain_type="map_reduce", # or stuff or map_rerank
             return_source_documents=True
         )
 
     def generate_priming_text(self):
-        pcap_summary = " ".join([str(page) for page in self.pages[:5]])
+        # Take more than 5 pages if available, but keep it compact
+        raw_preview = " ".join([d.page_content[:300] for d in self.pages[:20]])
+
+        # Build a summary-like snippet
+        pcap_summary = f"Here are some excerpts from the packet capture:\n{raw_preview}\n\n"
+
+        # Combine with PACKET_WHISPERER instructions
         return returnSystemText(pcap_summary)
+
 
     def chat(self, question):
         primed_question = self.priming_text + "\n\n" + question  # (see Option B note below)
