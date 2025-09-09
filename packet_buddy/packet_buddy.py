@@ -113,14 +113,15 @@ class ChatWithPCAP:
     def setup_conversation_retrieval_chain(self):
         self.llm = Ollama(
             model=st.session_state['selected_model'],
-            base_url="http://ollama:11434"
+            base_url="http://ollama:11434",
+            num_ctx=32768   # 👈 pass directly here
         )
         self.qa = ConversationalRetrievalChain.from_llm(
             llm=self.llm,
             retriever=self.vectordb.as_retriever(search_kwargs={"k": 6}),
             memory=self.memory,
-            chain_type="stuff",         # or "map_reduce"/"map_rerank"
-            return_source_documents=True             # <-- so we can display sources
+            chain_type="stuff",
+            return_source_documents=True
         )
 
     def generate_priming_text(self):
@@ -255,5 +256,6 @@ if __name__ == "__main__":
 
     if st.session_state['page'] == 1:
         upload_and_convert_pcap()
+
     elif st.session_state['page'] == 2:
         chat_interface()

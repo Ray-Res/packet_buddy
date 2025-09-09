@@ -36,7 +36,7 @@ services:
       - ollama
 
   packet_buddy:
-    image: johncapobianco/packet_buddy:packet_buddy
+    image: ray-res/packet_buddy:packet_buddy
     container_name: packet_buddy
     restart: always
     environment:
